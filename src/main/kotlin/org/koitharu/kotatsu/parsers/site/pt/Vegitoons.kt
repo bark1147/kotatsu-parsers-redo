@@ -37,72 +37,57 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 	)
 
 	override suspend fun getFilterOptions(): MangaListFilterOptions {
+		val tags = linkedSetOf<MangaTag>()
 
-	val tags = mutableSetOf<MangaTag>()
+		for (page in 1..5) {
+			val json = webClient
+				.httpGet("$apiUrl/obras/buscar?pagina=$page&limite=100")
+				.parseJson()
 
-	for (pagina in 1..5) {
+			val obras = json.optJSONArray("obras") ?: break
 
-		val json = webClient
-			.httpGet(
-				"$apiUrl/obras/buscar?pagina=$pagina&limite=100"
-			)
-			.parseJson()
+			for (index in 0 until obras.length()) {
+				val obra = obras.optJSONObject(index) ?: continue
+				addTagsFromWork(obra, tags)
+			}
 
-		val obras = json.optJSONArray("obras")
-			?: break
+			if (obras.length() < 100) {
+				break
+			}
+		}
 
+		return MangaListFilterOptions(
+			availableTags = tags,
+			availableStates = EnumSet.of(
+				MangaState.ONGOING,
+				MangaState.FINISHED,
+			),
+			availableContentTypes = EnumSet.of(
+				ContentType.MANGA,
+				ContentType.HENTAI,
+			),
+		)
+	}
 
-		for (i in 0 until obras.length()) {
-
-			val obra = obras.optJSONObject(i)
-				?: continue
-
-			val tagArray = obra.optJSONArray("tags")
-				?: continue
-
-
-			for (j in 0 until tagArray.length()) {
-
-				val tag = tagArray.optJSONObject(j)
-					?: continue
-
+	private fun addTagsFromWork(json: JSONObject, tags: MutableSet<MangaTag>) {
+		json.optJSONArray("tags")?.let { array ->
+			for (index in 0 until array.length()) {
+				val tag = array.optJSONObject(index) ?: continue
 				val id = tag.optInt("tag_id")
-				val nome = tag.optString("tag_nome")
+				val name = tag.optString("tag_nome")
 
-				if (nome.isNotBlank()) {
-
+				if (name.isNotBlank()) {
 					tags.add(
 						MangaTag(
 							key = id.toString(),
-							title = nome,
+							title = name,
 							source = source,
-						)
+						),
 					)
 				}
 			}
 		}
-
-
-		if (obras.length() < 100) {
-			break
-		}
 	}
-
-
-	    return MangaListFilterOptions(
-		availableTags = tags,
-
-		availableStates = EnumSet.of(
-			MangaState.ONGOING,
-			MangaState.FINISHED,
-		),
-
-		availableContentTypes = EnumSet.of(
-			ContentType.MANGA,
-			ContentType.HENTAI,
-		),
-	   )
-        }
 
 	private val chapterDateFormat =
 		SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", sourceLocale)
@@ -110,9 +95,8 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 	override suspend fun getListPage(
 		page: Int,
 		order: SortOrder,
-		filter: MangaListFilter
+		filter: MangaListFilter,
 	): List<Manga> {
-
 		val url = if (!filter.query.isNullOrEmpty() || filter.types.isNotEmpty() || filter.tags.isNotEmpty()) {
 			buildSearchUrl(page, filter)
 		} else {
@@ -134,99 +118,87 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 		}
 	}
 
-	    private fun buildSearchUrl(
-	            page: Int,
-	            filter: MangaListFilter
-            ): HttpUrl {
+	private fun buildSearchUrl(page: Int, filter: MangaListFilter): HttpUrl {
+		val builder = "$apiUrl/obras/buscar".toHttpUrl()
+			.newBuilder()
+			.addQueryParameter("pagina", page.toString())
+			.addQueryParameter("limite", pageSize.toString())
 
-	        val builder = "$apiUrl/obras/buscar".toHttpUrl()
-		     .newBuilder()
-		     .addQueryParameter("pagina", page.toString())
-		     .addQueryParameter("limite", pageSize.toString())
+		filter.query?.let {
+			builder.addQueryParameter("busca", it)
+		}
 
-	       filter.query?.let {
-		       builder.addQueryParameter("busca", it)
-	       }
+		if (filter.tags.isNotEmpty()) {
+			builder.addQueryParameter(
+				"tag_ids",
+				filter.tags.joinToString(",") { it.key },
+			)
+		}
 
-	       if (filter.tags.isNotEmpty()) {
-		      builder.addQueryParameter(
-		  	  "tag_ids",
-		       	  filter.tags.joinToString(",") { tag -> tag.key }
-		    )
-	       }
+		when {
+			filter.types.contains(ContentType.HENTAI) -> {
+				builder.addQueryParameter("gen_id", "5")
+			}
 
-	             when {
-		         filter.types.contains(ContentType.HENTAI) -> {
-			        builder.addQueryParameter("gen_id", "5")
-		         }
+			filter.types.contains(ContentType.MANGA) -> {
+				builder.addQueryParameter("gen_id", "1,4,6,8")
+			}
+		}
 
-		         filter.types.contains(ContentType.MANGA) -> {
-			         builder.addQueryParameter("gen_id", "1,4,6,8")
-		         }
-	              }
+		return builder.build()
+	}
 
-	              return builder.build()
-                }
-
-        	private fun parseMangaFromJson(json: JSONObject): Manga {
-
+	private fun parseMangaFromJson(json: JSONObject): Manga {
 		val id = json.optInt("obr_id")
 		val name = json.optString("obr_nome")
 		val slug = json.optString("obr_slug")
 
-		val tags = mutableSetOf<MangaTag>()
+		val tags = linkedSetOf<MangaTag>()
 
-		// Gênero
-		json.optJSONObject("genero")?.let {
-	            val id = it.optInt("gen_id")
-	            val nome = it.optString("gen_nome")
+		json.optJSONObject("genero")?.let { genre ->
+			val genreId = genre.optInt("gen_id")
+			val genreName = genre.optString("gen_nome")
 
-	            if (nome.isNotBlank()) {
-		        tags.add(
-			     MangaTag(
-				key = "gen_$id",
-				title = nome,
-				source = source,
-			     )
-		         )
-	             }
-                 }
-
-		// Tags
-		json.optJSONArray("tags")?.let { array ->
-
-	             for (i in 0 until array.length()) {
-
-		          val tagObj = array.optJSONObject(i)
-
-		          val id = tagObj?.optInt("tag_id")
-		          val nome = tagObj?.optString("tag_nome")
-
-		          if (id != null && !nome.isNullOrBlank()) {
-			      tags.add(
-				   MangaTag(
-					key = id.toString(),
-					title = nome,
-					source = source,
-				   )
-			      )
-		         }
-	             }
-                 }
-
-		// Formato
-		json.optString("formato_nome")
-			.takeIf { it.isNotBlank() }
-			?.let {
+			if (genreName.isNotBlank()) {
 				tags.add(
 					MangaTag(
-						key = it.lowercase().replace(" ", "_"),
-						title = it,
+						key = "gen_$genreId",
+						title = genreName,
 						source = source,
-					)
+					),
 				)
 			}
+		}
 
+		json.optJSONArray("tags")?.let { array ->
+			for (index in 0 until array.length()) {
+				val tagObj = array.optJSONObject(index) ?: continue
+				val tagId = tagObj.optInt("tag_id")
+				val tagName = tagObj.optString("tag_nome")
+
+				if (tagName.isNotBlank()) {
+					tags.add(
+						MangaTag(
+							key = tagId.toString(),
+							title = tagName,
+							source = source,
+						),
+					)
+				}
+			}
+		}
+
+		json.optString("formato_nome")
+			.takeIf { it.isNotBlank() }
+			?.let { formatName ->
+				tags.add(
+					MangaTag(
+						key = formatName.lowercase().replace(" ", "_"),
+						title = formatName,
+						source = source,
+					),
+				)
+			}
 
 		return Manga(
 			id = generateUid(id.toLong()),
@@ -239,11 +211,7 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 			altTitles = emptySet(),
 			contentRating = null,
 			tags = tags,
-			state = when(json.optString("status_nome")) {
-				"Em Andamento" -> MangaState.ONGOING
-				"Concluído" -> MangaState.FINISHED
-				else -> null
-			},
+			state = parseMangaState(json.optString("status_nome")),
 			authors = emptySet(),
 			largeCoverUrl = null,
 			description = json.optString("obr_descricao"),
@@ -251,9 +219,13 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 		)
 	}
 
+	private fun parseMangaState(status: String): MangaState? = when (status) {
+		"Em Andamento" -> MangaState.ONGOING
+		"Concluído" -> MangaState.FINISHED
+		else -> null
+	}
 
 	override suspend fun getDetails(manga: Manga): Manga {
-
 		val id = manga.url.substringAfter("/obra/")
 			.substringBefore("/")
 
@@ -261,16 +233,10 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 			.httpGet("$apiUrl/obras/$id")
 			.parseJson()
 
-
 		val chapters = json.optJSONArray("capitulos")
-			?.mapJSON {
-				parseChapter(it)
-			}
-			?.sortedBy {
-				it.number
-			}
+			?.mapJSON { parseChapter(it) }
+			?.sortedBy { it.number }
 			?: emptyList()
-
 
 		return manga.copy(
 			description = json.optString("obr_descricao"),
@@ -278,9 +244,7 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 		)
 	}
 
-
-        	private fun parseChapter(json: JSONObject): MangaChapter {
-
+	private fun parseChapter(json: JSONObject): MangaChapter {
 		val id = json.getLong("cap_id")
 
 		return MangaChapter(
@@ -291,29 +255,24 @@ internal class Vegitoons(context: MangaLoaderContext) : PagedMangaParser(
 			url = "/capitulo/$id",
 			scanlator = null,
 			uploadDate = chapterDateFormat.parseSafe(
-				json.optString("cap_criado_em")
+				json.optString("cap_criado_em"),
 			),
 			branch = null,
 			source = source,
 		)
 	}
 
-
 	override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-
 		val id = chapter.url.substringAfterLast("/")
 
 		val json = webClient
 			.httpGet("$apiUrl/capitulos/$id")
 			.parseJson()
 
-
 		val pages = json.getJSONArray("cap_paginas")
 
-
-		return (0 until pages.length()).map {
-
-			val url = pages.getString(it)
+		return (0 until pages.length()).map { index ->
+			val url = pages.getString(index)
 
 			MangaPage(
 				id = generateUid(url),
